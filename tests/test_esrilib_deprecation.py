@@ -11,6 +11,7 @@ already depend on has to keep raising what it documented, keep its
 signatures, and say once — not per call — that it has moved.
 """
 import inspect
+import re
 import warnings
 
 import pytest
@@ -22,23 +23,28 @@ import geeViz.esriLib as el
 
 def test_georest_is_a_declared_dependency():
     """A delegation to a package that is not installed is an ImportError
-    at the worst moment. It has to be in install_requires, not a hopeful
+    at the worst moment. It has to be a core dependency, not a hopeful
     import."""
     import pathlib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        import tomli as tomllib
     # Walk up rather than counting parents: geeViz is installed into the
     # venvs as a SYMLINK to this tree, so the depth of __file__ depends
     # on which interpreter is running the test.
     here = pathlib.Path(el.__file__).resolve()
     for parent in here.parents:
-        cand = parent / "setup.py"
+        cand = parent / "pyproject.toml"
         if cand.exists():
-            setup = cand.read_text(encoding="utf-8")
-            break
+            project = tomllib.loads(cand.read_text(encoding="utf-8")).get("project", {})
+            if project.get("name") == "geeviz":
+                break
     else:
-        pytest.skip("setup.py not found above the installed geeViz")
-    i = setup.index("install_requires=[")
-    j = setup.index("]", i)
-    assert "georest" in setup[i:j], "georest is not declared in install_requires"
+        pytest.skip("geeviz pyproject.toml not found above the installed geeViz")
+    deps = project.get("dependencies", [])
+    assert any(re.match(r"georest\b", d) for d in deps), (
+        "georest is not declared in [project].dependencies")
 
 
 def test_georest_imports_and_has_what_we_delegate_to():

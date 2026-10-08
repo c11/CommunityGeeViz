@@ -234,15 +234,25 @@ def test_kaleido_is_a_core_dependency():
     """It backs four shipped features, so it is not optional. It was
     declared only under the ``mcp`` extra, and unpinned — which is how
     0.x -> 1.0 crossed silently."""
-    setup = (ROOT.parent / "setup.py").read_text(encoding="utf-8")
-    core, _, extras = setup.partition("extras_require")
-    assert "kaleido" in core, "kaleido is not in install_requires"
-    assert re.search(r'"kaleido>=1', core), "no version floor on kaleido"
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        import tomli as tomllib
+    pyproject = ROOT.parent / "pyproject.toml"
+    if not pyproject.exists():
+        pytest.skip("pyproject.toml not in this checkout")
+    deps = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["dependencies"]
+    kaleido = [d for d in deps if re.match(r"kaleido\b", d)]
+    assert kaleido, "kaleido is not in [project].dependencies"
+    assert re.search(r">=\s*1", kaleido[0]), "no version floor on kaleido"
 
 
 def test_the_container_installs_a_browser():
     """The actual repair. Both rasterization paths discover a system
     browser; the slim image had none."""
-    df = (ROOT.parent / "geeViz_agent" / "Dockerfile").read_text(encoding="utf-8")
+    dockerfile = ROOT.parent / "geeViz_agent" / "Dockerfile"
+    if not dockerfile.exists():
+        pytest.skip("agent Dockerfile not in this checkout")
+    df = dockerfile.read_text(encoding="utf-8")
     install = df[df.index("apt-get install"):df.index("rm -rf /var/lib/apt/lists")]
     assert "chromium" in install

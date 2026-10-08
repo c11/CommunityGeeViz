@@ -11,8 +11,8 @@ declared others, and nothing compared them. The fix is that geeViz's
 rather than restating it.
 
 These packages are deliberately in an extra rather than in
-``install_requires``: nothing in geeViz imports them — verified by AST
-across both trees. They exist so USER CODE can import them.
+``[project].dependencies``: nothing in geeViz imports them — verified by
+AST across both trees. They exist so USER CODE can import them.
 """
 import ast
 import re
@@ -20,13 +20,18 @@ from pathlib import Path
 
 import pytest
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
+
 ROOT = Path(__file__).resolve().parents[2]
-SETUP = ROOT / "setup.py"
+PYPROJECT = ROOT / "pyproject.toml"
 DOCKERFILE = ROOT / "geeViz_agent" / "Dockerfile"
 
 #: What an agent's generated code is promised. Adding to the REPL means
-#: adding here AND to setup.py's ``_MCP_EXTRA``; the tests below enforce
-#: that the two agree.
+#: adding here AND to pyproject.toml's ``mcp`` extra; the tests below
+#: enforce that the two agree.
 REPL_CONTRACT = {
     "scipy", "scikit-learn", "statsmodels",
     "seaborn", "tabulate",
@@ -34,29 +39,34 @@ REPL_CONTRACT = {
 }
 
 _NAME = re.compile(r"[><=\[]")
+_SELF = re.compile(r"geeviz\[([^\]]+)\]", re.IGNORECASE)
 
 
 def _extras():
-    """Resolve ``extras_require`` from setup.py without installing anything.
+    """Resolve ``[project.optional-dependencies]`` from pyproject.toml.
 
-    Cannot use ``ast.literal_eval``: the extras reference module-level
-    NAMES (``_MCP_EXTRA``) and compose ``all`` from them, deliberately,
-    so ``all`` cannot drift out of sync the way the old hand-copied
-    literal had. So execute the prelude — everything before the
-    ``setuptools.setup(`` call, which is pure assignments — and evaluate
-    the dict against those bindings.
+    ``all`` is composed from the other extras by self-reference
+    (``geeviz[mcp,...]``), deliberately, so it cannot drift out of sync
+    the way the old hand-copied literal had. Expand those references so
+    each extra lists the requirements it actually pulls in.
     """
-    src = SETUP.read_text(encoding="utf-8")
-    prelude = src[:src.index("setuptools.setup(")]
-    ns = {}
-    exec(compile(prelude, str(SETUP), "exec"), ns)          # noqa: S102
+    if not PYPROJECT.exists():
+        pytest.skip("pyproject.toml not in this checkout")
+    extras = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))[
+        "project"]["optional-dependencies"]
 
-    tree = ast.parse(src)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.keyword) and node.arg == "extras_require":
-            return eval(compile(ast.Expression(node.value), str(SETUP), "eval"),
-                        ns)                                  # noqa: S307
-    raise AssertionError("no extras_require in setup.py")
+    def expand(name):
+        out = []
+        for spec in extras[name]:
+            m = _SELF.fullmatch(spec.strip())
+            if m:
+                for sub in m.group(1).split(","):
+                    out += expand(sub.strip())
+            else:
+                out.append(spec)
+        return out
+
+    return {name: expand(name) for name in extras}
 
 
 def _names(specs):
@@ -129,7 +139,8 @@ def test_the_agent_still_installs_the_extra():
 def test_nothing_in_geeviz_imports_the_repl_packages():
     """They are an extra, not a core dependency, precisely because the
     library does not need them. If geeViz starts importing one it must
-    move to install_requires, or a plain ``pip install geeviz`` breaks.
+    move to ``[project].dependencies``, or a plain ``pip install geeviz``
+    breaks.
 
     Uses AST rather than grep: a first pass with grep matched a docstring
     example (``>>> import seaborn as sns``) and would have moved a
