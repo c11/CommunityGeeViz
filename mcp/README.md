@@ -39,7 +39,7 @@ In short: a vanilla agent can _read about_ GEE; the MCP lets it _use_ GEE. Every
 ## Requirements
 
 - Python 3.x
-- geeViz (`pip install geeViz`) -- the [mcp](https://pypi.org/project/mcp/) SDK is included as a dependency automatically
+- geeViz (`pip install geeViz`) -- [FastMCP](https://pypi.org/project/fastmcp/) (and through it the [mcp](https://pypi.org/project/mcp/) SDK) is included as a dependency automatically
 - Authenticated Earth Engine session (run `ee.Authenticate()` + `ee.Initialize(project=...)` beforehand, or let geeViz handle it on first tool call)
 
 ```bash
@@ -254,9 +254,13 @@ Variables set in one `run_code` call are available in subsequent calls within th
 
 Uses `threading.Thread(daemon=True)` + `.join(timeout)`. Known limitation: a hung `getInfo()` call cannot be force-killed on Windows -- the thread continues in background.
 
-### FastMCP loading
+### FastMCP
 
-Because `geeViz.mcp` shadows the `mcp` SDK package name, the server resolves `FastMCP` by scanning site-packages directly (`_load_fastmcp()`).
+The server is built on standalone [FastMCP](https://gofastmcp.com) 4.1+ (`from fastmcp import FastMCP`). Behavior that applies to every tool call is FastMCP middleware (`on_call_tool`), registered outermost first:
+
+1. `_LLMUsageMiddleware` collects Gemini usage that geeViz reports during the call and attaches it to the result as `_llm_usage`.
+2. `_ScrubMiddleware` redacts credentials in every text part and in `structuredContent`.
+3. `_WorkloadTagMiddleware` removes the agent's `_workload_tag`, `_tenant`, `_agent_user_email` and `_agent_session_id` arguments. It does this before FastMCP validates the arguments, because FastMCP rejects keywords a tool does not declare. It then sets those values as the EE routing and attribution ContextVars for the duration of the call.
 
 ## Example usage
 
@@ -373,7 +377,8 @@ cat geeViz/mcp/agent-instructions.md
 ```python
 from geeViz.mcp import app
 
-# app is the FastMCP instance; use with mcp.run() or your MCP host.
+# app is the FastMCP instance: app.run() for stdio, or
+# app.run(transport="http", host=..., port=..., path=...) for HTTP.
 ```
 
 ## Related packages

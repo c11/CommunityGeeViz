@@ -141,8 +141,10 @@ def _frozenset_names(var):
     return set(re.findall(r'"([a-zA-Z0-9_]+)"', m.group(1)))
 
 
-HTTP_STACK = ["urllib3", "httpx", "httpcore", "aiohttp", "httplib2",
-              "websocket", "websockets"]
+# httpx2 / httpcore2 arrived with FastMCP 4: httpx and httpcore under
+# new names, so the same full outbound client.
+HTTP_STACK = ["urllib3", "httpx", "httpcore", "httpx2", "httpcore2",
+              "aiohttp", "httplib2", "websocket", "websockets"]
 
 
 @pytest.mark.parametrize("mod", HTTP_STACK)

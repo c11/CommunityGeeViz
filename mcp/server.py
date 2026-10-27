@@ -68,6 +68,7 @@ if _SANDBOX_ENABLED:
         # urllib3 making a real outbound request while requests was
         # blocked.
         "urllib3", "httpx", "httpcore", "h11", "h2", "hpack",
+        "httpx2", "httpcore2",
         "aiohttp", "aiohappyeyeballs", "aiosignal", "yarl",
         "httplib2", "websocket", "websockets", "curl_cffi", "socks",
         "socketserver",
@@ -559,7 +560,7 @@ Options:
   streamable-http when binding to non-localhost (remote/cloud deployment).
 
 Environment (optional):
-  MCP_TRANSPORT   Transport: "stdio" (default) or "streamable-http"
+  MCP_TRANSPORT   Transport: "stdio" (default) or "streamable-http" ("http")
   MCP_HOST        Host for HTTP (default: 127.0.0.1)
   MCP_PORT        Port for HTTP (default: 8000)
   MCP_PATH        Path for HTTP (default: /mcp)
@@ -601,29 +602,30 @@ if _GEEVIZ_DIR not in sys.path:
     sys.path.append(_GEEVIZ_DIR)
 
 
-# Load FastMCP from the MCP SDK. When run as python -m geeViz.mcp.server, the name "mcp"
-# resolves to this package (geeViz.mcp), so we load the SDK's fastmcp by file from site-packages.
-# If mcp is not installed (e.g. during Sphinx doc build), a lightweight stub is used so the
-# module can still be imported and @app.tool() decorators pass functions through unchanged.
-def _load_fastmcp():
-    import site as _site
-    for _sp in _site.getsitepackages():
-        _origin = os.path.join(_sp, "mcp", "server", "fastmcp.py")
-        if os.path.isfile(_origin):
-            spec = importlib.util.spec_from_file_location("_geeviz_mcp_sdk_fastmcp", _origin)
-            if spec and spec.loader:
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                return mod.FastMCP
-    try:
-        from mcp.server.fastmcp import FastMCP
-        return FastMCP
-    except ModuleNotFoundError:
-        return None
+# The server is built on standalone FastMCP (the ``fastmcp`` package, 4.1+).
+# If it is not installed (e.g. during Sphinx doc build), a lightweight stub is
+# used so the module can still be imported and @app.tool() decorators pass
+# functions through unchanged.
+try:
+    from fastmcp import FastMCP as _FastMCP
+    # Module-level ``Context`` so typing.get_type_hints() can resolve the
+    # annotation in run_code's signature (required for FastMCP context injection).
+    from fastmcp import Context
+    from fastmcp.server.middleware import Middleware as _Middleware
+    # The exact Image class FastMCP checks with isinstance() when converting
+    # tool results; anything else is not rendered inline by clients like Cursor.
+    from fastmcp.utilities.types import Image as _MCPImage
+except ModuleNotFoundError:
+    _FastMCP = None
+    Context = None
+    _MCPImage = None
+
+    class _Middleware:
+        """Base for the call_tool layers below when FastMCP is absent."""
 
 
 class _StubFastMCP:
-    """Lightweight stand-in when the mcp SDK is not installed.
+    """Lightweight stand-in when FastMCP is not installed.
 
     Makes @app.tool() a no-op passthrough so functions keep their real
     type and docstrings (important for Sphinx autodoc).
@@ -649,110 +651,31 @@ class _StubFastMCP:
             return fn
         return _identity
 
+    def add_middleware(self, middleware):
+        """No-op: there is no dispatch for middleware to wrap."""
+
     def run(self, **kwargs):
         """Raise a clear error when the MCP server is asked to actually run.
 
         The stub exists only to keep imports working; running requires the
-        real ``mcp`` package.
+        real ``fastmcp`` package.
 
         Raises:
-            RuntimeError: Always — install ``mcp`` to run the server.
+            RuntimeError: Always — install ``fastmcp`` to run the server.
         """
-        raise RuntimeError("mcp SDK not installed; install with: pip install mcp")
+        raise RuntimeError("FastMCP not installed; install with: pip install fastmcp")
 
 
-_FastMCP = _load_fastmcp()
 FastMCP = _FastMCP if _FastMCP is not None else _StubFastMCP
 
-# Load ToolAnnotations for hinting read-only / destructive / etc.
-try:
-    from mcp.types import ToolAnnotations
-except ImportError:
-    # Stub if mcp SDK not installed
-    class ToolAnnotations:
-        """Fallback ``ToolAnnotations`` when the ``mcp`` package is absent.
-
-        Accepts any kwargs (readOnlyHint, destructiveHint, etc.) and stores
-        nothing — the real class ships hints to MCP clients, this one just
-        keeps decorator calls valid at import time.
-        """
-        def __init__(self, **kwargs): pass
-
-# Pre-built annotation sets
-_READ_ONLY = ToolAnnotations(readOnlyHint=True, idempotentHint=True)
-_READ_ONLY_OPEN = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=True)
-_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
-_WRITE_OPEN = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True)
-_DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=True)
-
-
-def _load_mcp_image():
-    """Load the Image class from the mcp SDK for returning images from tools.
-
-    IMPORTANT: Try the direct import first so we get the exact same Image class
-    that FastMCP uses internally. If we load from file (as a standalone module),
-    the class identity differs and FastMCP's isinstance() check fails, causing
-    images to not display in clients like Cursor.
-    """
-    # Preferred: direct import matches FastMCP's own Image class
-    try:
-        from mcp.server.fastmcp.utilities.types import Image
-        return Image
-    except (ImportError, ModuleNotFoundError, AttributeError):
-        pass
-    # Fallback: load from file in site-packages (older SDK layouts)
-    import site as _site
-    for _sp in _site.getsitepackages():
-        _types_path = os.path.join(_sp, "mcp", "server", "fastmcp", "utilities", "types.py")
-        if os.path.isfile(_types_path):
-            try:
-                spec = importlib.util.spec_from_file_location("_geeviz_mcp_types", _types_path)
-                if spec and spec.loader:
-                    mod = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(mod)
-                    cls = getattr(mod, "Image", None)
-                    if cls is not None:
-                        return cls
-            except Exception:
-                pass
-    return None
-
-
-_MCPImage = _load_mcp_image()
-
-
-def _load_mcp_context():
-    """Load the Context class from the MCP SDK for progress reporting in tools.
-
-    Uses the same importlib approach as _load_fastmcp() to avoid name conflicts
-    with the geeViz.mcp package.
-    """
-    # Preferred: direct import matches FastMCP's own Context class
-    try:
-        from mcp.server.fastmcp import Context
-        return Context
-    except (ImportError, ModuleNotFoundError, AttributeError):
-        pass
-    # Fallback: load from file in site-packages
-    import site as _site
-    for _sp in _site.getsitepackages():
-        _origin = os.path.join(_sp, "mcp", "server", "fastmcp", "server.py")
-        if os.path.isfile(_origin):
-            try:
-                spec = importlib.util.spec_from_file_location("_geeviz_mcp_sdk_context", _origin)
-                if spec and spec.loader:
-                    mod = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(mod)
-                    return mod.Context
-            except Exception:
-                pass
-    return None
-
-
-_MCPContext = _load_mcp_context()
-# Expose as module-level ``Context`` so typing.get_type_hints() can resolve the
-# annotation in run_code's signature (required for FastMCP context injection).
-Context = _MCPContext
+# Pre-built ToolAnnotations hint sets (read-only / destructive / etc.).
+# FastMCP builds the ToolAnnotations from a dict, so the stub needs no
+# stand-in class.
+_READ_ONLY = {"readOnlyHint": True, "idempotentHint": True}
+_READ_ONLY_OPEN = {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True}
+_WRITE = {"readOnlyHint": False, "destructiveHint": False}
+_WRITE_OPEN = {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True}
+_DESTRUCTIVE = {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True}
 
 # Load agent instructions from the bundled markdown file.
 # These are injected as the MCP server instructions (like a system prompt)
@@ -797,10 +720,11 @@ except Exception:
     _SERVER_INSTRUCTIONS = None
     print("[geeViz MCP] WARNING: No agent instructions loaded", file=sys.stderr, flush=True)
 
+# HTTP settings (host, port, path, json_response) are run() arguments in
+# FastMCP 4, so they are passed in main(), not here.
 app = FastMCP(
     "geeViz",
     instructions=_SERVER_INSTRUCTIONS,
-    json_response=True,
 ) if _FastMCP is not None else _StubFastMCP()
 
 # ---------------------------------------------------------------------------
@@ -813,11 +737,11 @@ app = FastMCP(
 # the tag into every outbound compute body via the library's existing
 # ``_maybe_populate_workload_tag`` path.
 #
-# Why this hook (ToolManager.call_tool) and not ``app.call_tool``: FastMCP
-# captures ``app.call_tool`` as a bound method at ``__init__`` and registers
-# that reference with the lowlevel MCP server, so a later monkey-patch on
-# ``app.call_tool`` is never reached. ``app._tool_manager.call_tool`` is
-# the next layer down and is dereferenced fresh on every dispatch.
+# This and the two layers after it are FastMCP middleware (``on_call_tool``),
+# registered on ``app`` below. The agent's fields MUST come off before
+# ``call_next``: FastMCP validates arguments against the tool function's
+# signature and rejects keywords it does not declare, so a stamped call
+# would fail validation instead of running.
 #
 # Non-agent callers (Claude Code, etc.) just don't send ``_workload_tag``
 # and EE's default workload-tag behavior applies — the MCP stays
@@ -899,17 +823,15 @@ def _sanitize_workload_tag(tag: str) -> str:
     return tag
 
 
-_orig_tool_manager_call_tool = app._tool_manager.call_tool
+class _WorkloadTagMiddleware(_Middleware):
+    """Strip the agent's routing fields and scope EE attribution to the call."""
 
-
-async def _tool_manager_call_tool_with_workload_tag(
-    name, arguments, context=None, convert_result=False
-):
-    tag = None
-    tenant = ""
-    explicit_user = ""
-    explicit_session = ""
-    if isinstance(arguments, dict):
+    async def on_call_tool(self, context, call_next):
+        arguments = dict(context.message.arguments or {})
+        tag = None
+        tenant = ""
+        explicit_user = ""
+        explicit_session = ""
         raw = arguments.pop("_workload_tag", None)
         if raw:
             tag = _sanitize_workload_tag(str(raw))
@@ -928,7 +850,17 @@ async def _tool_manager_call_tool_with_workload_tag(
         raw_session = arguments.pop("_agent_session_id", None)
         if raw_session:
             explicit_session = str(raw_session).strip()
+        context = context.copy(
+            message=context.message.model_copy(update={"arguments": arguments})
+        )
+        return await _call_with_attribution(
+            call_next, context, tag, tenant, explicit_user, explicit_session
+        )
 
+
+async def _call_with_attribution(call_next, context, tag, tenant,
+                                 explicit_user, explicit_session):
+    """Run ``call_next`` with the tenant / user / session / workload tag set."""
     # ContextVar for tenant: TenantAwareHttp reads it on every outbound
     # EE request and stamps the routing header.
     tenant_token = _CURRENT_TENANT_CV.set(tenant) if tenant else None
@@ -954,9 +886,7 @@ async def _tool_manager_call_tool_with_workload_tag(
 
     try:
         if not tag:
-            return await _orig_tool_manager_call_tool(
-                name, arguments, context=context, convert_result=convert_result
-            )
+            return await call_next(context)
         # EE's own setWorkloadTag uses a ContextVar internally, so the tag
         # carries through ``await`` boundaries to whatever EE call user code
         # eventually makes. resetWorkloadTag in ``finally`` keeps the state
@@ -968,13 +898,9 @@ async def _tool_manager_call_tool_with_workload_tag(
             # If EE isn't initialized yet, swallow — the agent's first tool
             # call is usually run_code, which initializes EE before doing
             # any actual compute. Subsequent calls will tag correctly.
-            return await _orig_tool_manager_call_tool(
-                name, arguments, context=context, convert_result=convert_result
-            )
+            return await call_next(context)
         try:
-            return await _orig_tool_manager_call_tool(
-                name, arguments, context=context, convert_result=convert_result
-            )
+            return await call_next(context)
         finally:
             try:
                 _ee_data.resetWorkloadTag()
@@ -992,30 +918,21 @@ async def _tool_manager_call_tool_with_workload_tag(
 def _scrub_tool_result(result):
     """Redact credentials in any string field of a FastMCP tool result.
 
-    FastMCP tools return either a ``ToolResult`` (newer SDKs) with a
-    ``.content`` list, or a bare list of ``Content`` items (older SDKs).
-    ``TextContent`` items carry a ``.text`` attribute; other content
-    types (ImageContent / EmbeddedResource) don't. We walk both shapes
-    and scrub every ``.text`` in place — this is the single chokepoint
-    that catches secrets escaping via ANY tool, not just ``run_code``
-    (where we already scrub at each return site as belt-and-suspenders).
+    Middleware sees a ``ToolResult``: a ``.content`` list plus an optional
+    ``.structured_content`` dict. ``TextContent`` items carry a ``.text``
+    attribute; other content types (ImageContent / EmbeddedResource)
+    don't. We scrub every ``.text`` and every string in the structured
+    dict in place — this is the single chokepoint that catches secrets
+    escaping via ANY tool, not just ``run_code`` (where we already scrub
+    at each return site as belt-and-suspenders).
     """
     if result is None:
         return result
-    # Iterable of Content items (list / tuple).
-    if isinstance(result, (list, tuple)):
-        for item in result:
-            _scrub_content_item(item)
-        return result
-    # ToolResult with .content list.
     content = getattr(result, "content", None)
     if isinstance(content, (list, tuple)):
         for item in content:
             _scrub_content_item(item)
-    # Some SDKs also carry a .structuredContent dict — scrub it too.
-    structured = getattr(result, "structuredContent", None) or getattr(
-        result, "structured_content", None
-    )
+    structured = getattr(result, "structured_content", None)
     if isinstance(structured, dict):
         _scrub_dict_inplace(structured)
     return result
@@ -1053,28 +970,23 @@ def _scrub_dict_inplace(d: dict) -> None:
                     _scrub_dict_inplace(item)
 
 
-_pre_scrub_call_tool = _tool_manager_call_tool_with_workload_tag
-
-
-async def _tool_manager_call_tool_with_scrub(
-    name, arguments, context=None, convert_result=False
-):
+class _ScrubMiddleware(_Middleware):
     """Post-process every tool response through the credential scrubber.
 
     Wraps the workload-tag layer — that layer handles EE routing /
     ContextVar plumbing and returns the FastMCP tool result unchanged;
-    this wrapper walks the result and redacts any secret shape or
+    this layer walks the result and redacts any secret shape or
     exact env-var value before FastMCP serializes it back to the model.
     """
-    result = await _pre_scrub_call_tool(
-        name, arguments, context=context, convert_result=convert_result
-    )
-    try:
-        return _scrub_tool_result(result)
-    except Exception:
-        # Fail-open on scrub crashes rather than break every tool call.
-        # The per-return-site scrubs in run_code still catch its output.
-        return result
+
+    async def on_call_tool(self, context, call_next):
+        result = await call_next(context)
+        try:
+            return _scrub_tool_result(result)
+        except Exception:
+            # Fail-open on scrub crashes rather than break every tool call.
+            # The per-return-site scrubs in run_code still catch its output.
+            return result
 
 
 # ---------------------------------------------------------------------------
@@ -1095,9 +1007,8 @@ async def _tool_manager_call_tool_with_scrub(
 # drains the field, records it, and strips it before the model ever
 # sees it.
 #
-# Outermost of the call_tool wrappers, so the window spans everything
+# Outermost of the call_tool layers, so the window spans everything
 # the tool did.
-_pre_usage_call_tool = _tool_manager_call_tool_with_scrub
 
 # The field name is underscore-prefixed to mark it as transport, not
 # tool output. It is removed by the agent before the response is
@@ -1107,7 +1018,7 @@ _LLM_USAGE_FIELD = "_llm_usage"
 
 
 def _put_in_structured(structured: dict, records: list) -> None:
-    """Write the usage field into a structuredContent dict, in place.
+    """Write the usage field into a structured_content dict, in place.
 
     A single-key ``{"result": "<json string>"}`` envelope holds the real
     payload as text, so the field goes INSIDE it — that is where the
@@ -1130,7 +1041,7 @@ def _put_in_structured(structured: dict, records: list) -> None:
 def _attach_llm_usage(result, records: list):
     """Put ``records`` on the tool result, wherever the result keeps data.
 
-    Prefers ``structuredContent`` because it survives untouched; falls
+    Prefers ``structured_content`` because it survives untouched; falls
     back to re-serializing the first JSON text part. Returns the result
     either way — a tool call must not fail because its accounting could
     not be attached.
@@ -1138,33 +1049,20 @@ def _attach_llm_usage(result, records: list):
     if not records:
         return result
 
-    # FastMCP's REAL dispatch passes convert_result=True, and that
-    # returns a plain ``(content_list, structured_dict)`` TUPLE rather
-    # than a ToolResult. Missing this meant nothing was ever attached on
-    # the only path that matters: the tuple fell through to the
-    # list/tuple branch below, whose two items are a list and a dict —
-    # neither carries ``.text`` — so the function returned the result
-    # untouched and every geeViz LLM call went unbilled. Silently.
-    #
-    # The unit test did not catch it because its fake inner returned a
-    # ToolResult-shaped object: a shape the real dispatch never
-    # produces. Test the wiring, not just the helper.
-    if (isinstance(result, tuple) and len(result) == 2
-            and isinstance(result[1], dict)):
-        _put_in_structured(result[1], records)
-        return result
-
-    structured = getattr(result, "structuredContent", None) or getattr(
-        result, "structured_content", None
-    )
+    # The shape here is whatever the REAL dispatch hands middleware — a
+    # ``ToolResult`` under FastMCP 4. Under the SDK's mcp.server.fastmcp
+    # it was a plain ``(content_list, structured_dict)`` tuple instead,
+    # and a version of this function that only knew ToolResult attached
+    # nothing on the only path that matters: every geeViz LLM call went
+    # unbilled, silently. Its unit test passed because the fake inner
+    # returned a shape the real dispatch never produced. Test the wiring,
+    # not just the helper (test_mcp_llm_usage_attach.py drives app.call_tool).
+    structured = getattr(result, "structured_content", None)
     if isinstance(structured, dict):
         _put_in_structured(structured, records)
         return result
 
-    content = getattr(result, "content", None)
-    if content is None and isinstance(result, (list, tuple)):
-        content = result
-    for item in (content or []):
+    for item in (getattr(result, "content", None) or []):
         text = getattr(item, "text", None)
         if not isinstance(text, str) or not text:
             continue
@@ -1188,7 +1086,7 @@ def _attach_llm_usage(result, records: list):
 
 
 # Imported HERE, at module scope, and deliberately not inside the
-# wrapper below.
+# middleware below.
 #
 # A call-time ``from geeViz import llmUsage`` inside the wrapper
 # deadlocked the server. ``main()`` starts a daemon thread that prewarms
@@ -1204,22 +1102,23 @@ def _attach_llm_usage(result, records: list):
 from geeViz import llmUsage as _lu
 
 
-async def _tool_manager_call_tool_with_usage(
-    name, arguments, context=None, convert_result=False
-):
+class _LLMUsageMiddleware(_Middleware):
     """Collect LLM usage reported during one tool call and attach it."""
-    with _lu.collect() as records:
-        result = await _pre_usage_call_tool(
-            name, arguments, context=context, convert_result=convert_result
-        )
-    try:
-        return _attach_llm_usage(result, list(records))
-    except Exception:
-        # Accounting must never cost a caller their result.
-        return result
+
+    async def on_call_tool(self, context, call_next):
+        with _lu.collect() as records:
+            result = await call_next(context)
+        try:
+            return _attach_llm_usage(result, list(records))
+        except Exception:
+            # Accounting must never cost a caller their result.
+            return result
 
 
-app._tool_manager.call_tool = _tool_manager_call_tool_with_usage
+# Registration order is nesting order: the first added is outermost.
+app.add_middleware(_LLMUsageMiddleware())
+app.add_middleware(_ScrubMiddleware())
+app.add_middleware(_WorkloadTagMiddleware())
 
 # Wrap app.tool() to auto-log every tool invocation
 _original_app_tool = app.tool
@@ -2590,8 +2489,10 @@ _BLOCKED_MODULES = frozenset({
     # ``urllib3.PoolManager().request(...)`` — status 200, 559 bytes,
     # while ``import requests`` on the line above was refused.
     # httpx / aiohttp / httplib2 / websocket ship as transitive deps and
-    # were equally importable.
+    # were equally importable. httpx2 / httpcore2 are the same clients
+    # renamed: FastMCP 4 depends on them.
     "urllib3", "httpx", "httpcore", "h11", "h2", "hpack",
+    "httpx2", "httpcore2",
     "aiohttp", "aiohappyeyeballs", "aiosignal", "yarl",
     "httplib2", "websocket", "websockets", "curl_cffi", "socks",
     "socketserver", "ftplib",
@@ -2702,6 +2603,7 @@ _UNPICKLING_CALLS = frozenset({
 _BLOCKED_MODULE_ATTRS = frozenset({
     "os", "sys", "subprocess", "shutil", "pathlib", "tempfile",
     "socket", "requests", "urllib", "urllib3", "httpx", "httpcore",
+    "httpx2", "httpcore2",
     "aiohttp", "httplib2", "websocket", "smtplib", "ftplib",
     "importlib", "marshal", "runpy", "zipimport", "builtins", "ctypes",
     "pickle", "shelve", "dbm", "sqlite3", "multiprocessing",
@@ -6646,7 +6548,10 @@ def main() -> None:
     # stdio is standard for Cursor/IDE integration; use streamable-http for HTTP
     transport = os.environ.get("MCP_TRANSPORT", "stdio")
 
-    if transport == "streamable-http":
+    # FastMCP 4 also accepts "http" for streamable HTTP. It must take this
+    # branch too: the other one would serve HTTP with the sandbox defaulted
+    # OFF, whatever address it bound.
+    if transport in ("streamable-http", "http"):
         host = os.environ.get("MCP_HOST", "127.0.0.1")
         port = int(os.environ.get("MCP_PORT", "8000"))
         path = os.environ.get("MCP_PATH", "/mcp")
@@ -6661,23 +6566,26 @@ def main() -> None:
             _is_localhost = host in ("127.0.0.1", "localhost", "::1")
             _SANDBOX_ENABLED = not _is_localhost
 
-        # FastMCP.run() doesn't accept host/port kwargs; set them on the
-        # settings object directly so uvicorn picks them up.
-        app.settings.host = host
-        app.settings.port = port
-        app.settings.streamable_http_path = path
-        # When binding to 0.0.0.0 (cloud deployment), disable DNS rebinding
-        # protection so external hostnames (e.g. Cloud Run) are accepted.
-        if host == "0.0.0.0":
-            app.settings.transport_security.enable_dns_rebinding_protection = False
         print(f"MCP server starting at http://{host}:{port}{path} (sandbox={'ON' if _SANDBOX_ENABLED else 'OFF'})", file=sys.stderr)
-        app.run(transport=transport, mount_path=path)
+        # Host/Origin validation guards a loopback bind against DNS
+        # rebinding. A 0.0.0.0 bind (Cloud Run, Databricks Apps) turns it
+        # off: the platform routes external hostnames in, possibly through a
+        # proxy on loopback, which "auto" would answer with 421.
+        app.run(
+            transport="http",
+            host=host,
+            port=port,
+            path=path,
+            json_response=True,
+            host_origin_protection=False if host == "0.0.0.0" else "auto",
+            show_banner=False,
+        )
     else:
         # stdio transport — default sandbox OFF (local IDE use)
         if _SANDBOX_ENABLED is None:
             _SANDBOX_ENABLED = False
         print(f"MCP server starting (stdio, sandbox={'ON' if _SANDBOX_ENABLED else 'OFF'})", file=sys.stderr)
-        app.run(transport=transport)
+        app.run(transport=transport, show_banner=False)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### geeViz.mcp — built on FastMCP 4.1
+
+- **The server runs on standalone FastMCP (``fastmcp>=4.1,<5``) instead
+  of the SDK's ``mcp.server.fastmcp``.** That module is gone in mcp 2.0,
+  which is why 2026.9.4 had to pin ``mcp<2.0``. FastMCP 4 is what
+  supports mcp 2.x, so this removes the pin rather than renewing it.
+  The tools, their names, parameters, annotations and result shapes are
+  unchanged: a ``-> str`` tool still answers ``{"result": "<json>"}`` in
+  ``structuredContent``.
+- **Workload tag, credential scrub and LLM-usage attachment are FastMCP
+  middleware now.** They had been patched over
+  ``app._tool_manager.call_tool``, a private attribute FastMCP 4 does not
+  have. ``on_call_tool`` is the public hook for the same position.
+- **Agent routing fields come off before validation.** The SDK ignored
+  arguments a tool did not declare, so the agent could add
+  ``_workload_tag`` / ``_tenant`` / ``_agent_user_email`` /
+  ``_agent_session_id`` to any call. FastMCP 4 validates against the
+  function signature and fails such a call with
+  ``unexpected_keyword_argument``. The workload-tag middleware strips
+  them first.
+- **``MCP_TRANSPORT=http`` is HTTP.** FastMCP calls streamable HTTP
+  ``"http"``. Before this change that value would have fallen through to
+  the stdio branch. That branch defaults the sandbox OFF, so the server
+  would have served HTTP with an unsandboxed ``run_code``. Both spellings
+  now take the HTTP path. Host, port, path and ``json_response`` moved
+  from settings to ``run()`` arguments. DNS-rebinding protection is still
+  on for a loopback bind and off for ``0.0.0.0``.
+- **``httpx2`` and ``httpcore2`` are blocked in ``run_code``.** FastMCP
+  depends on them. They are httpx and httpcore under new names, a
+  complete outbound HTTP client, and their old names were already on
+  both blocklists.
+- ``mcp_with_gemini_tutorial.ipynb`` reads ``tool.input_schema``. mcp 2.x
+  renamed its fields to snake_case, and ``inputSchema`` raises
+  ``AttributeError`` there.
+
 ### geeViz.esriLib — uncached services draw, feature layers load faster
 
 - **Uncached Image Services draw.** ``addEsriImageService`` used
